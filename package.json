@@ -1,0 +1,32 @@
+{
+  "name": "@serbanghita-gamedev/quadtree",
+  "description": "Quadtree",
+  "keywords": [
+    "quadtree"
+  ],
+  "version": "1.0.0",
+  "author": "Serban Ghita <serbanghita@gmail.com> (https://ghita.org)",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "main": "./src/index.ts",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild ./src/index.ts --bundle --outfile=dist/quadtree.js",
+    "test": "vitest --watch=false",
+    "lint": "eslint ./src",
+    "demo": "vite demo --open",
+    "prepublishOnly": "npm run build && npm run test"
+  },
+  "dependencies": {
+    "@serbanghita-gamedev/geometry": "file:../geometry"
+  },
+  "devDependencies": {
+    "esbuild": "^0.27.2",
+    "eslint": "^9.39.2",
+    "vite-tsconfig-paths": "^6.0.3",
+    "vitest": "^4.0.16"
+  }
+}
