@@ -21,7 +21,7 @@
     "prepublishOnly": "npm run build && npm run test"
   },
   "dependencies": {
-    "@serbanghita-gamedev/geometry": "file:../geometry"
+    "@serbanghita-gamedev/geometry": "^1.0.0"
   },
   "devDependencies": {
     "esbuild": "^0.27.2",
