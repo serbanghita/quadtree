@@ -89,86 +89,105 @@
       this.quadrants = {};
       this.hasQuadrants = false;
     }
-    createQuadrants() {
-      const topLeft = new _QuadTree(
-        new Rectangle(this.area.width / 2, this.area.height / 2, new Point(this.area.center.x - this.area.width / 4, this.area.center.y - this.area.height / 4)),
-        this.maxDepth,
-        this.maxPoints,
-        this.depth + 1
-      );
-      const topRight = new _QuadTree(
-        new Rectangle(this.area.width / 2, this.area.height / 2, new Point(this.area.center.x + this.area.width / 4, this.area.center.y - this.area.height / 4)),
-        this.maxDepth,
-        this.maxPoints,
-        this.depth + 1
-      );
-      const bottomLeft = new _QuadTree(
-        new Rectangle(this.area.width / 2, this.area.height / 2, new Point(this.area.center.x - this.area.width / 4, this.area.center.y + this.area.height / 4)),
-        this.maxDepth,
-        this.maxPoints,
-        this.depth + 1
-      );
-      const bottomRight = new _QuadTree(
-        new Rectangle(this.area.width / 2, this.area.height / 2, new Point(this.area.center.x + this.area.width / 4, this.area.center.y + this.area.height / 4)),
-        this.maxDepth,
-        this.maxPoints,
-        this.depth + 1
-      );
-      return { topLeft, topRight, bottomLeft, bottomRight };
-    }
-    candidatePoint(point) {
-      return this.area.intersectsWithPoint(point);
-    }
     addPoint(point) {
-      if (!this.candidatePoint(point)) {
+      if (!this.area.intersectsWithPoint(point)) {
         return false;
       }
+      if (this.hasQuadrants) {
+        this.routePoint(point);
+        return true;
+      }
       this.points.push(point);
-      if (this.hasQuadrants || this.points.length > this.maxPoints && this.depth < this.maxDepth) {
-        this.redistributePoints();
-        this.clearPoints();
+      if (this.points.length > this.maxPoints && this.depth < this.maxDepth) {
+        this.subdivide();
       }
       return true;
     }
-    redistributePoints() {
-      const quadrants = this.createQuadrants();
-      this.points.forEach((point) => {
-        for (const [key, quadrant] of Object.entries(quadrants)) {
-          const searchInQuadrant = this.quadrants[key] ?? quadrant;
-          if (searchInQuadrant.candidatePoint(point)) {
-            if (!this.quadrants[key]) {
-              this.quadrants[key] = quadrant;
-            }
-            this.quadrants[key]?.addPoint(point);
-            break;
-          }
-        }
-      });
-      if (Object.keys(this.quadrants).length > 0) {
-        this.hasQuadrants = true;
-      }
+    query(area) {
+      const results = [];
+      this.queryInto(area, results);
+      return results;
     }
     clearPoints() {
       this.points = [];
     }
-    query(area) {
-      if (!this.area.intersects(area)) {
-        return [];
-      }
-      if (this.points.length === 0) {
-        return Object.values(this.quadrants).reduce((acc, quadrant) => {
-          return acc.concat(quadrant.query(area));
-        }, []);
-      }
-      return this.points.filter((point) => area.intersectsWithPoint(point));
-    }
-    clearQuadrants() {
-      this.hasQuadrants = false;
-      this.quadrants = {};
-    }
     clear() {
-      this.clearPoints();
-      this.clearQuadrants();
+      this.points = [];
+      this.quadrants = {};
+      this.hasQuadrants = false;
+    }
+    queryInto(area, results) {
+      if (!this.area.intersects(area)) {
+        return;
+      }
+      if (this.hasQuadrants) {
+        this.quadrants.topLeft?.queryInto(area, results);
+        this.quadrants.topRight?.queryInto(area, results);
+        this.quadrants.bottomLeft?.queryInto(area, results);
+        this.quadrants.bottomRight?.queryInto(area, results);
+        return;
+      }
+      for (const point of this.points) {
+        if (area.intersectsWithPoint(point)) {
+          results.push(point);
+        }
+      }
+    }
+    subdivide() {
+      const pointsToRoute = this.points;
+      this.points = [];
+      for (const point of pointsToRoute) {
+        if (this.area.intersectsWithPoint(point)) {
+          this.routePoint(point);
+        }
+      }
+    }
+    // Boundary points (x === center.x or y === center.y) go to the top/left side.
+    routePoint(point) {
+      const cx = this.area.center.x;
+      const cy = this.area.center.y;
+      const key = point.y <= cy ? point.x <= cx ? "topLeft" : "topRight" : point.x <= cx ? "bottomLeft" : "bottomRight";
+      let child = this.quadrants[key];
+      if (!child) {
+        child = this.createChild(key);
+        this.quadrants[key] = child;
+        this.hasQuadrants = true;
+      }
+      child.addPoint(point);
+    }
+    createChild(key) {
+      const halfW = this.area.width / 2;
+      const halfH = this.area.height / 2;
+      const quarterW = halfW / 2;
+      const quarterH = halfH / 2;
+      const cx = this.area.center.x;
+      const cy = this.area.center.y;
+      let childCx;
+      let childCy;
+      switch (key) {
+        case "topLeft":
+          childCx = cx - quarterW;
+          childCy = cy - quarterH;
+          break;
+        case "topRight":
+          childCx = cx + quarterW;
+          childCy = cy - quarterH;
+          break;
+        case "bottomLeft":
+          childCx = cx - quarterW;
+          childCy = cy + quarterH;
+          break;
+        case "bottomRight":
+          childCx = cx + quarterW;
+          childCy = cy + quarterH;
+          break;
+      }
+      return new _QuadTree(
+        new Rectangle(halfW, halfH, new Point(childCx, childCy)),
+        this.maxDepth,
+        this.maxPoints,
+        this.depth + 1
+      );
     }
   };
 })();
