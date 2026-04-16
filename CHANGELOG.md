@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-04-16
+
+### Changed
+- Trimmed published npm tarball: excluded `.idea/` (JetBrains metadata) and `eslint.config.js` (dev tooling).
+
 ## [1.0.1] - 2026-04-16
 
 ### Changed

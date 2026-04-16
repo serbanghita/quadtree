@@ -1,7 +1,9 @@
 # Dev/build tooling
 .claude/
+.idea/
 tsconfig.json
 vite.config.ts
+eslint.config.js
 
 # Tests & benchmarks
 src/**/*.test.ts
