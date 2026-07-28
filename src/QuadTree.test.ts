@@ -184,4 +184,66 @@ describe("QuadTree", () => {
       expect(pointsFound).toHaveLength(5);
     });
   });
+
+  describe("AABB and Incremental Updates", () => {
+    it("addBounds stores a large rectangle in multiple quadrants", () => {
+      const area = new Rectangle(640, 480, new Point(640 / 2, 480 / 2));
+      const q = new QuadTree(area, 3, 2);
+
+      // Add points to different quadrants to force root subdivision
+      // but prevent immediate children from subdividing
+      q.addPoint(new Point(10, 10));     // topLeft
+      q.addPoint(new Point(600, 10));    // topRight
+      q.addPoint(new Point(10, 400));    // bottomLeft
+
+      // Add a large bounds that crosses the center
+      const largeBounds = new Rectangle(400, 400, new Point(320, 240));
+      q.addBounds("bg-1", largeBounds);
+
+      // Verify it's in multiple quadrants
+      expect(q.hasQuadrants).toBe(true);
+      expect(q.quadrants.topLeft?.boundedItems).toHaveLength(1);
+      expect(q.quadrants.topRight?.boundedItems).toHaveLength(1);
+      expect(q.quadrants.bottomLeft?.boundedItems).toHaveLength(1);
+      expect(q.quadrants.bottomRight?.boundedItems).toHaveLength(1);
+    });
+
+    it("queryIds deduplicates returned ids", () => {
+      const area = new Rectangle(640, 480, new Point(640 / 2, 480 / 2));
+      const q = new QuadTree(area, 3, 2);
+      
+      q.addPoint(new Point(10, 10, "p-1"));
+      q.addPoint(new Point(10, 20, "p-2"));
+      q.addPoint(new Point(10, 30, "p-3"));
+      
+      const largeBounds = new Rectangle(400, 400, new Point(320, 240));
+      q.addBounds("bg-1", largeBounds);
+      
+      // Query an area that encompasses the entire tree
+      const ids = q.queryIds(area);
+      expect(ids).toHaveLength(4);
+      expect(ids).toContain("p-1");
+      expect(ids).toContain("p-2");
+      expect(ids).toContain("p-3");
+      expect(ids).toContain("bg-1");
+    });
+    
+    it("remove deletes the bounds completely", () => {
+      const area = new Rectangle(640, 480, new Point(640 / 2, 480 / 2));
+      const q = new QuadTree(area, 3, 2);
+      
+      q.addPoint(new Point(10, 10, "p-1"));
+      q.addPoint(new Point(10, 20, "p-2"));
+      
+      const largeBounds = new Rectangle(400, 400, new Point(320, 240));
+      q.addBounds("bg-1", largeBounds);
+      
+      const removed = q.remove("bg-1");
+      expect(removed).toBe(true);
+      
+      const ids = q.queryIds(area);
+      expect(ids).toHaveLength(2);
+      expect(ids).not.toContain("bg-1");
+    });
+  });
 });
