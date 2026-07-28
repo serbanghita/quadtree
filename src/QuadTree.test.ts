@@ -186,7 +186,7 @@ describe("QuadTree", () => {
   });
 
   describe("AABB and Incremental Updates", () => {
-    it("addBounds stores a large rectangle in multiple quadrants", () => {
+    it("bounds crossing the center are stored once, on the node that contains them", () => {
       const area = new Rectangle(640, 480, new Point(640 / 2, 480 / 2));
       const q = new QuadTree(area, 3, 2);
 
@@ -196,16 +196,87 @@ describe("QuadTree", () => {
       q.addPoint(new Point(600, 10));    // topRight
       q.addPoint(new Point(10, 400));    // bottomLeft
 
-      // Add a large bounds that crosses the center
       const largeBounds = new Rectangle(400, 400, new Point(320, 240));
       q.addBounds("bg-1", largeBounds);
 
-      // Verify it's in multiple quadrants
       expect(q.hasQuadrants).toBe(true);
-      expect(q.quadrants.topLeft?.boundedItems).toHaveLength(1);
+      expect(q.boundedItems).toHaveLength(1);
+      expect(q.quadrants.topLeft?.boundedItems).toHaveLength(0);
+      expect(q.quadrants.topRight?.boundedItems).toHaveLength(0);
+      expect(q.quadrants.bottomLeft?.boundedItems).toHaveLength(0);
+      expect(q.quadrants.bottomRight?.boundedItems).toBeUndefined();
+      expect(q.queryIds(area)).toEqual(["bg-1"]);
+    });
+
+    it("bounds that fit inside one quadrant descend into it", () => {
+      const area = new Rectangle(640, 480, new Point(640 / 2, 480 / 2));
+      const q = new QuadTree(area, 3, 2);
+
+      q.addPoint(new Point(10, 10));
+      q.addPoint(new Point(600, 10));
+      q.addPoint(new Point(10, 400));
+
+      q.addBounds("b-1", new Rectangle(20, 20, new Point(500, 100)));
+
+      expect(q.boundedItems).toHaveLength(0);
       expect(q.quadrants.topRight?.boundedItems).toHaveLength(1);
-      expect(q.quadrants.bottomLeft?.boundedItems).toHaveLength(1);
-      expect(q.quadrants.bottomRight?.boundedItems).toHaveLength(1);
+      expect(q.quadrants.topLeft?.boundedItems).toHaveLength(0);
+    });
+
+    it("bounds larger than the root area stay at the root", () => {
+      const area = new Rectangle(640, 480, new Point(640 / 2, 480 / 2));
+      const q = new QuadTree(area, 3, 2);
+
+      q.addPoint(new Point(10, 10));
+      q.addPoint(new Point(600, 10));
+      q.addPoint(new Point(10, 400));
+
+      expect(q.addBounds("huge", new Rectangle(2000, 2000, new Point(320, 240)))).toBe(true);
+      expect(q.boundedItems).toHaveLength(1);
+      expect(q.queryIds(new Rectangle(10, 10, new Point(600, 400)))).toContain("huge");
+    });
+
+    it("overlapping bounds are never duplicated, however many are added", () => {
+      const area = new Rectangle(640, 480, new Point(640 / 2, 480 / 2));
+      const q = new QuadTree(area, 5, 10);
+
+      q.addPoint(new Point(10, 10));
+      q.addPoint(new Point(600, 10));
+      q.addPoint(new Point(10, 400));
+      q.addPoint(new Point(600, 400));
+
+      for (let i = 0; i < 200; i++) {
+        q.addBounds(`d-${i}`, new Rectangle(200, 200, new Point(320, 240)));
+      }
+
+      const countStored = (node: QuadTree): number => {
+        let total = node.points.length + node.boundedItems.length;
+        for (const child of [node.quadrants.topLeft, node.quadrants.topRight, node.quadrants.bottomLeft, node.quadrants.bottomRight]) {
+          if (child) total += countStored(child);
+        }
+        return total;
+      };
+
+      expect(countStored(q)).toBe(204);
+
+      const ids = q.queryIds(new Rectangle(200, 200, new Point(320, 240)));
+      expect(ids.filter((id) => id === "d-0")).toHaveLength(1);
+      expect(new Set(ids).size).toBe(ids.length);
+    });
+
+    it("a node whose items all straddle the center subdivides only once", () => {
+      const area = new Rectangle(640, 480, new Point(640 / 2, 480 / 2));
+      const q = new QuadTree(area, 5, 2);
+
+      for (let i = 0; i < 20; i++) {
+        q.addBounds(`s-${i}`, new Rectangle(400, 400, new Point(320, 240)));
+      }
+
+      expect(q.boundedItems).toHaveLength(20);
+      expect(q.hasQuadrants).toBe(false);
+      expect(q.queryIds(area)).toHaveLength(20);
+      expect(q.remove("s-5")).toBe(true);
+      expect(q.queryIds(area)).toHaveLength(19);
     });
 
     it("queryIds deduplicates returned ids", () => {
@@ -228,6 +299,228 @@ describe("QuadTree", () => {
       expect(ids).toContain("bg-1");
     });
     
+    it("emptied quadrants are pruned and the tree collapses back to a leaf", () => {
+      const area = new Rectangle(640, 480, new Point(640 / 2, 480 / 2));
+      const q = new QuadTree(area, 5, 2);
+
+      for (let i = 0; i < 50; i++) {
+        q.addPoint(new Point((i * 13) % 640, (i * 29) % 480, `p-${i}`));
+      }
+      expect(q.hasQuadrants).toBe(true);
+
+      for (let i = 0; i < 50; i++) {
+        expect(q.remove(`p-${i}`)).toBe(true);
+      }
+
+      expect(q.hasQuadrants).toBe(false);
+      expect(q.quadrants).toEqual({});
+      expect(q.query(area)).toHaveLength(0);
+
+      // and the collapsed tree still behaves like a fresh one
+      q.addPoint(new Point(100, 100, "again"));
+      expect(q.points).toHaveLength(1);
+      expect(q.query(area)).toHaveLength(1);
+    });
+
+    it("a subtree that thins out below maxPoints merges back into one leaf", () => {
+      const area = new Rectangle(640, 480, new Point(640 / 2, 480 / 2));
+      const q = new QuadTree(area, 3, 4);
+
+      q.addPoint(new Point(10, 10, "tl-1"));
+      q.addPoint(new Point(20, 20, "tl-2"));
+      q.addPoint(new Point(600, 10, "tr-1"));
+      q.addPoint(new Point(10, 400, "bl-1"));
+      q.addPoint(new Point(600, 400, "br-1"));
+      expect(q.hasQuadrants).toBe(true);
+      expect(q.points).toHaveLength(0);
+
+      expect(q.remove("br-1")).toBe(true);
+
+      expect(q.hasQuadrants).toBe(false);
+      expect(q.quadrants).toEqual({});
+      expect(q.points).toHaveLength(4);
+      expect(q.queryIds(area).sort()).toEqual(["bl-1", "tl-1", "tl-2", "tr-1"]);
+    });
+
+    it("merging stops at a quadrant that is still subdivided", () => {
+      const area = new Rectangle(640, 480, new Point(640 / 2, 480 / 2));
+      const q = new QuadTree(area, 3, 2);
+
+      q.addPoint(new Point(10, 10, "tl-1"));
+      q.addPoint(new Point(20, 20, "tl-2"));
+      q.addPoint(new Point(30, 30, "tl-3"));
+      q.addPoint(new Point(600, 400, "br-1"));
+      expect(q.quadrants.topLeft?.hasQuadrants).toBe(true);
+
+      expect(q.remove("br-1")).toBe(true);
+
+      expect(q.quadrants).not.toHaveProperty("bottomRight");
+      expect(q.quadrants).toHaveProperty("topLeft");
+      expect(q.hasQuadrants).toBe(true);
+      expect(q.queryIds(area).sort()).toEqual(["tl-1", "tl-2", "tl-3"]);
+    });
+
+    it("queryBounds returns the bounded items that query() omits", () => {
+      const area = new Rectangle(640, 480, new Point(640 / 2, 480 / 2));
+      const q = new QuadTree(area, 3, 2);
+
+      q.addPoint(new Point(10, 10, "p-1"));
+      q.addBounds("b-1", new Rectangle(20, 20, new Point(100, 100)));
+      q.addBounds("b-2", new Rectangle(20, 20, new Point(600, 400)));
+
+      const found = q.queryBounds(new Rectangle(60, 60, new Point(100, 100)));
+      expect(found).toHaveLength(1);
+      expect(found[0].id).toBe("b-1");
+      expect(found[0].bounds.center.x).toBe(100);
+
+      expect(q.query(area)).toHaveLength(1);
+      expect(q.queryBounds(area)).toHaveLength(2);
+    });
+
+    it("clearPoints empties the whole tree, not just the root node", () => {
+      const area = new Rectangle(640, 480, new Point(640 / 2, 480 / 2));
+      const q = new QuadTree(area, 3, 2);
+
+      q.addPoint(new Point(10, 10, "p-1"));
+      q.addPoint(new Point(20, 20, "p-2"));
+      q.addPoint(new Point(600, 400, "p-3"));
+      q.addBounds("b-1", new Rectangle(400, 400, new Point(320, 240)));
+      expect(q.hasQuadrants).toBe(true);
+
+      q.clearPoints();
+
+      expect(q.query(area)).toHaveLength(0);
+      expect(q.queryIds(area)).toHaveLength(0);
+      expect(q.quadrants.topLeft?.points).toHaveLength(0);
+      expect(q.quadrants.topLeft?.boundedItems).toHaveLength(0);
+      expect(q.quadrants.bottomRight?.points).toHaveLength(0);
+    });
+
+    it("re-adding an existing id replaces instead of duplicating", () => {
+      const area = new Rectangle(640, 480, new Point(640 / 2, 480 / 2));
+      const q = new QuadTree(area, 3, 2);
+
+      q.addPoint(new Point(10, 10, "p-1"));
+      q.addPoint(new Point(20, 20, "p-2"));
+      q.addPoint(new Point(600, 400, "p-3"));
+
+      q.addPoint(new Point(300, 300, "p-1"));
+
+      const copies = q.query(area).filter((p) => p.id === "p-1");
+      expect(copies).toHaveLength(1);
+      expect(copies[0].x).toBe(300);
+      expect(q.remove("p-1")).toBe(true);
+      expect(q.query(area).some((p) => p.id === "p-1")).toBe(false);
+    });
+
+    it("re-adding an existing bounds id replaces instead of duplicating", () => {
+      const area = new Rectangle(640, 480, new Point(640 / 2, 480 / 2));
+      const q = new QuadTree(area, 3, 2);
+
+      q.addPoint(new Point(10, 10, "p-1"));
+      q.addPoint(new Point(20, 20, "p-2"));
+      q.addBounds("b-1", new Rectangle(400, 400, new Point(320, 240)));
+
+      q.addBounds("b-1", new Rectangle(10, 10, new Point(600, 400)));
+
+      expect(q.queryIds(area).filter((id) => id === "b-1")).toHaveLength(1);
+      expect(q.queryIds(new Rectangle(20, 20, new Point(320, 240)))).not.toContain("b-1");
+      expect(q.queryIds(new Rectangle(20, 20, new Point(600, 400)))).toContain("b-1");
+    });
+
+    it("addPoint outside the area leaves an existing id untouched", () => {
+      const area = new Rectangle(640, 480, new Point(640 / 2, 480 / 2));
+      const q = new QuadTree(area, 3, 2);
+
+      q.addPoint(new Point(10, 10, "p-1"));
+      q.addPoint(new Point(20, 20, "p-2"));
+      q.addPoint(new Point(600, 400, "p-3"));
+
+      expect(q.addPoint(new Point(9999, 9999, "p-1"))).toBe(false);
+      expect(q.query(area).filter((p) => p.id === "p-1")).toHaveLength(1);
+    });
+
+    it("remove finds a Point that was mutated in place", () => {
+      const area = new Rectangle(640, 480, new Point(640 / 2, 480 / 2));
+      const q = new QuadTree(area, 3, 2);
+
+      const point = new Point(10, 10, "p-1");
+      q.addPoint(point);
+      q.addPoint(new Point(20, 20, "p-2"));
+      q.addPoint(new Point(600, 400, "p-3"));
+
+      point.x = 600;
+      point.y = 400;
+
+      expect(q.remove("p-1")).toBe(true);
+      expect(q.query(area).some((p) => p.id === "p-1")).toBe(false);
+    });
+
+    it("updatePoint with a Point mutated in place does not duplicate it", () => {
+      const area = new Rectangle(640, 480, new Point(640 / 2, 480 / 2));
+      const q = new QuadTree(area, 3, 2);
+
+      const point = new Point(10, 10, "p-1");
+      q.addPoint(point);
+      q.addPoint(new Point(20, 20, "p-2"));
+      q.addPoint(new Point(600, 400, "p-3"));
+
+      point.x = 600;
+      point.y = 400;
+      expect(q.updatePoint("p-1", point)).toBe(true);
+
+      const copies = q.query(area).filter((p) => p.id === "p-1");
+      expect(copies).toHaveLength(1);
+      expect(copies[0].x).toBe(600);
+      expect(q.query(new Rectangle(40, 40, new Point(10, 10))).some((p) => p.id === "p-1")).toBe(false);
+    });
+
+    it("a rejected update leaves the entity at its previous position", () => {
+      const area = new Rectangle(640, 480, new Point(640 / 2, 480 / 2));
+      const q = new QuadTree(area, 3, 2);
+
+      q.addPoint(new Point(10, 10, "p-1"));
+      q.addPoint(new Point(20, 20, "p-2"));
+      q.addPoint(new Point(600, 400, "p-3"));
+
+      expect(q.updatePoint("p-1", new Point(9999, 9999, "p-1"))).toBe(false);
+
+      const copies = q.query(area).filter((p) => p.id === "p-1");
+      expect(copies).toHaveLength(1);
+      expect(copies[0].x).toBe(10);
+      expect(q.remove("p-1")).toBe(true);
+    });
+
+    it("updateBounds moves an item out of the quadrants it no longer touches", () => {
+      const area = new Rectangle(640, 480, new Point(640 / 2, 480 / 2));
+      const q = new QuadTree(area, 3, 2);
+
+      q.addPoint(new Point(10, 10, "p-1"));
+      q.addPoint(new Point(20, 20, "p-2"));
+      q.addBounds("b-1", new Rectangle(400, 400, new Point(320, 240)));
+
+      expect(q.updateBounds("b-1", new Rectangle(10, 10, new Point(600, 400)))).toBe(true);
+
+      expect(q.queryIds(area).filter((id) => id === "b-1")).toHaveLength(1);
+      expect(q.queryIds(new Rectangle(20, 20, new Point(20, 20)))).not.toContain("b-1");
+      expect(q.queryIds(new Rectangle(20, 20, new Point(600, 400)))).toContain("b-1");
+    });
+
+    it("remove finds bounds whose Rectangle was mutated in place", () => {
+      const area = new Rectangle(640, 480, new Point(640 / 2, 480 / 2));
+      const q = new QuadTree(area, 3, 2);
+
+      q.addPoint(new Point(10, 10, "p-1"));
+      q.addPoint(new Point(20, 20, "p-2"));
+      const bounds = new Rectangle(20, 20, new Point(100, 100));
+      q.addBounds("b-1", bounds);
+
+      bounds.moveCenterTo(600, 400);
+
+      expect(q.remove("b-1")).toBe(true);
+      expect(q.queryIds(area)).not.toContain("b-1");
+    });
+
     it("remove deletes the bounds completely", () => {
       const area = new Rectangle(640, 480, new Point(640 / 2, 480 / 2));
       const q = new QuadTree(area, 3, 2);

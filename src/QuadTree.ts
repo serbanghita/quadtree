@@ -12,19 +12,26 @@ export interface BoundedItem {
   bounds: Rectangle;
 }
 
+const QUADRANT_KEYS = ["topLeft", "topRight", "bottomLeft", "bottomRight"] as const;
+
+type PointSnapshot = { x: number; y: number };
+type BoundsSnapshot = { x: number; y: number; width: number; height: number };
+
 export default class QuadTree {
   public points: Point[] = [];
   public boundedItems: BoundedItem[] = [];
   public quadrants: Quadrants = {};
   public hasQuadrants: boolean = false;
 
+  private hasSubdivided: boolean = false;
+  private pointRegistry: Map<string, PointSnapshot> = new Map();
+  private boundsRegistry: Map<string, BoundsSnapshot> = new Map();
+
   constructor(
     public readonly area: Rectangle,
     public readonly maxDepth: number,
     public readonly maxPoints: number,
-    public readonly depth: number = 0,
-    private pointRegistry: Map<string, Point> = new Map(),
-    private boundsRegistry: Map<string, Rectangle> = new Map()
+    public readonly depth: number = 0
   ) {}
 
   public addPoint(point: Point): boolean {
@@ -33,18 +40,16 @@ export default class QuadTree {
     }
 
     if (this.depth === 0 && point.id !== undefined) {
-      this.pointRegistry.set(point.id, point);
+      this.registerPoint(point.id, point);
     }
 
-    if (this.hasQuadrants) {
+    if (this.hasSubdivided) {
       this.routePoint(point);
       return true;
     }
 
     this.points.push(point);
-    if (this.points.length + this.boundedItems.length > this.maxPoints && this.depth < this.maxDepth) {
-      this.subdivide();
-    }
+    this.subdivideIfFull();
     return true;
   }
 
@@ -54,83 +59,174 @@ export default class QuadTree {
     }
 
     if (this.depth === 0) {
-      this.boundsRegistry.set(id, bounds);
+      this.registerBounds(id, bounds);
     }
 
-    if (this.hasQuadrants) {
-      this.routeBounds({ id, bounds });
-      return true;
-    }
-
-    this.boundedItems.push({ id, bounds });
-    if (this.points.length + this.boundedItems.length > this.maxPoints && this.depth < this.maxDepth) {
-      this.subdivide();
-    }
+    this.insertBounds({ id, bounds });
     return true;
   }
 
   public remove(id: string): boolean {
-    if (this.pointRegistry.has(id)) {
-      const point = this.pointRegistry.get(id)!;
-      if (this.depth === 0) this.pointRegistry.delete(id);
+    const point = this.pointRegistry.get(id);
+    if (point !== undefined) {
+      this.pointRegistry.delete(id);
       return this.removePoint(id, point);
-    } else if (this.boundsRegistry.has(id)) {
-      const bounds = this.boundsRegistry.get(id)!;
-      if (this.depth === 0) this.boundsRegistry.delete(id);
+    }
+
+    const bounds = this.boundsRegistry.get(id);
+    if (bounds !== undefined) {
+      this.boundsRegistry.delete(id);
       return this.removeBounds(id, bounds);
     }
+
     return false;
   }
 
-  private removePoint(id: string, point: Point): boolean {
-    if (!this.area.intersectsWithPoint(point)) return false;
+  private removePoint(id: string, point: PointSnapshot): boolean {
+    if (!this.containsCoordinates(point.x, point.y)) return false;
 
-    if (this.hasQuadrants) {
+    if (this.hasSubdivided) {
       const cx = this.area.center.x;
       const cy = this.area.center.y;
       const key: keyof Quadrants = point.y <= cy
         ? point.x <= cx ? "topLeft" : "topRight"
         : point.x <= cx ? "bottomLeft" : "bottomRight";
-      
-      return this.quadrants[key]?.removePoint(id, point) || false;
+
+      if (!this.quadrants[key]?.removePoint(id, point)) return false;
+      this.pruneChild(key);
+      return true;
     }
 
-    const initialLength = this.points.length;
-    this.points = this.points.filter(p => p.id !== id);
-    return this.points.length < initialLength;
+    for (let i = 0; i < this.points.length; i++) {
+      if (this.points[i].id === id) {
+        this.points[i] = this.points[this.points.length - 1];
+        this.points.pop();
+        return true;
+      }
+    }
+    return false;
   }
 
-  private removeBounds(id: string, bounds: Rectangle): boolean {
-    if (!this.area.intersects(bounds)) return false;
-
-    if (this.hasQuadrants) {
-      let removed = false;
-      for (const key of ["topLeft", "topRight", "bottomLeft", "bottomRight"] as (keyof Quadrants)[]) {
-        if (this.quadrants[key]?.removeBounds(id, bounds)) {
-          removed = true;
-        }
+  private removeBounds(id: string, bounds: BoundsSnapshot): boolean {
+    if (this.hasSubdivided) {
+      const key = this.childContaining(bounds.x, bounds.y, bounds.width, bounds.height);
+      if (key !== undefined) {
+        if (!this.quadrants[key]?.removeBounds(id, bounds)) return false;
+        this.pruneChild(key);
+        return true;
       }
-      return removed;
     }
 
-    const initialLength = this.boundedItems.length;
-    this.boundedItems = this.boundedItems.filter(b => b.id !== id);
-    return this.boundedItems.length < initialLength;
+    for (let i = 0; i < this.boundedItems.length; i++) {
+      if (this.boundedItems[i].id === id) {
+        this.boundedItems[i] = this.boundedItems[this.boundedItems.length - 1];
+        this.boundedItems.pop();
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Called as removal unwinds, so a thinned-out branch collapses from the bottom up in a
+  // single pass and a churned tree keeps the same shape a freshly built one would have.
+  // A node sitting exactly at `maxPoints` splits and merges on every add/remove cycle
+  // (~1us vs ~0.4us if merging were deferred), which is the price for that.
+  private pruneChild(key: keyof Quadrants): void {
+    const child = this.quadrants[key];
+    if (child !== undefined && !child.hasQuadrants && child.points.length === 0 && child.boundedItems.length === 0) {
+      delete this.quadrants[key];
+      this.hasQuadrants = QUADRANT_KEYS.some((k) => this.quadrants[k] !== undefined);
+    }
+
+    if (!this.hasQuadrants) {
+      if (this.points.length === 0 && this.boundedItems.length === 0) {
+        this.hasSubdivided = false;
+      }
+      return;
+    }
+
+    let total = this.boundedItems.length;
+    for (const k of QUADRANT_KEYS) {
+      const quadrant = this.quadrants[k];
+      if (quadrant === undefined) continue;
+      if (quadrant.hasQuadrants) return;
+      total += quadrant.points.length + quadrant.boundedItems.length;
+    }
+
+    if (total > this.maxPoints) {
+      return;
+    }
+
+    for (const k of QUADRANT_KEYS) {
+      const quadrant = this.quadrants[k];
+      if (quadrant === undefined) continue;
+      for (const point of quadrant.points) this.points.push(point);
+      for (const bounded of quadrant.boundedItems) this.boundedItems.push(bounded);
+    }
+
+    this.quadrants = {};
+    this.hasQuadrants = false;
+    this.hasSubdivided = false;
   }
 
   public updatePoint(id: string, newPoint: Point): boolean {
-    this.remove(id);
+    if (newPoint.id !== id) {
+      this.remove(id);
+    }
     return this.addPoint(newPoint);
   }
 
   public updateBounds(id: string, newBounds: Rectangle): boolean {
-    this.remove(id);
     return this.addBounds(id, newBounds);
+  }
+
+  private registerPoint(id: string, point: Point): void {
+    const registered = this.pointRegistry.get(id);
+    if (registered !== undefined) {
+      this.removePoint(id, registered);
+      registered.x = point.x;
+      registered.y = point.y;
+      return;
+    }
+
+    const registeredBounds = this.boundsRegistry.get(id);
+    if (registeredBounds !== undefined) {
+      this.removeBounds(id, registeredBounds);
+      this.boundsRegistry.delete(id);
+    }
+
+    this.pointRegistry.set(id, { x: point.x, y: point.y });
+  }
+
+  private registerBounds(id: string, bounds: Rectangle): void {
+    const registered = this.boundsRegistry.get(id);
+    if (registered !== undefined) {
+      this.removeBounds(id, registered);
+      registered.x = bounds.center.x;
+      registered.y = bounds.center.y;
+      registered.width = bounds.width;
+      registered.height = bounds.height;
+      return;
+    }
+
+    const registeredPoint = this.pointRegistry.get(id);
+    if (registeredPoint !== undefined) {
+      this.removePoint(id, registeredPoint);
+      this.pointRegistry.delete(id);
+    }
+
+    this.boundsRegistry.set(id, { x: bounds.center.x, y: bounds.center.y, width: bounds.width, height: bounds.height });
   }
 
   public query(area: Rectangle): Point[] {
     const results: Point[] = [];
-    this.queryInto(area, results, []);
+    this.queryInto(area, results, null);
+    return results;
+  }
+
+  public queryBounds(area: Rectangle): BoundedItem[] {
+    const results: BoundedItem[] = [];
+    this.queryInto(area, null, results);
     return results;
   }
 
@@ -139,19 +235,25 @@ export default class QuadTree {
     const boundedItems: BoundedItem[] = [];
     this.queryInto(area, points, boundedItems);
 
-    const ids = new Set<string>();
+    const ids: string[] = [];
     for (const p of points) {
-      if (p.id !== undefined) ids.add(p.id);
+      if (p.id !== undefined) ids.push(p.id);
     }
     for (const b of boundedItems) {
-      ids.add(b.id);
+      ids.push(b.id);
     }
-    return Array.from(ids);
+    return ids;
   }
 
   public clearPoints(): void {
     this.points = [];
     this.boundedItems = [];
+
+    this.quadrants.topLeft?.clearPoints();
+    this.quadrants.topRight?.clearPoints();
+    this.quadrants.bottomLeft?.clearPoints();
+    this.quadrants.bottomRight?.clearPoints();
+
     if (this.depth === 0) {
       this.pointRegistry.clear();
       this.boundsRegistry.clear();
@@ -163,15 +265,50 @@ export default class QuadTree {
     this.boundedItems = [];
     this.quadrants = {};
     this.hasQuadrants = false;
+    this.hasSubdivided = false;
     if (this.depth === 0) {
       this.pointRegistry.clear();
       this.boundsRegistry.clear();
     }
   }
 
-  private queryInto(area: Rectangle, results: Point[], boundedResults: BoundedItem[]): void {
+  private containsCoordinates(x: number, y: number): boolean {
+    return x >= this.area.topLeftX && x <= this.area.topRightX && y >= this.area.topLeftY && y <= this.area.bottomLeftY;
+  }
+
+  private childContaining(x: number, y: number, width: number, height: number): keyof Quadrants | undefined {
+    const left = x - width / 2;
+    const right = x + width / 2;
+    const top = y - height / 2;
+    const bottom = y + height / 2;
+
+    if (left < this.area.topLeftX || right > this.area.topRightX || top < this.area.topLeftY || bottom > this.area.bottomLeftY) {
+      return undefined;
+    }
+
+    const cx = this.area.center.x;
+    const cy = this.area.center.y;
+
+    if (bottom <= cy) {
+      return right <= cx ? "topLeft" : left >= cx ? "topRight" : undefined;
+    }
+    if (top >= cy) {
+      return right <= cx ? "bottomLeft" : left >= cx ? "bottomRight" : undefined;
+    }
+    return undefined;
+  }
+
+  private queryInto(area: Rectangle, results: Point[] | null, boundedResults: BoundedItem[] | null): void {
     if (!this.area.intersects(area)) {
       return;
+    }
+
+    if (boundedResults !== null) {
+      for (const bounded of this.boundedItems) {
+        if (area.intersects(bounded.bounds)) {
+          boundedResults.push(bounded);
+        }
+      }
     }
 
     if (this.hasQuadrants) {
@@ -182,20 +319,37 @@ export default class QuadTree {
       return;
     }
 
-    for (const point of this.points) {
-      if (area.intersectsWithPoint(point)) {
-        results.push(point);
-      }
-    }
-    
-    for (const bounded of this.boundedItems) {
-      if (area.intersects(bounded.bounds)) {
-        boundedResults.push(bounded);
+    if (results !== null) {
+      for (const point of this.points) {
+        if (area.intersectsWithPoint(point)) {
+          results.push(point);
+        }
       }
     }
   }
 
-  private subdivide(): void {
+  private insertBounds(item: BoundedItem): void {
+    if (this.hasSubdivided) {
+      const key = this.childContaining(item.bounds.center.x, item.bounds.center.y, item.bounds.width, item.bounds.height);
+      if (key !== undefined) {
+        this.childAt(key).insertBounds(item);
+        return;
+      }
+      this.boundedItems.push(item);
+      return;
+    }
+
+    this.boundedItems.push(item);
+    this.subdivideIfFull();
+  }
+
+  private subdivideIfFull(): void {
+    if (this.points.length + this.boundedItems.length <= this.maxPoints || this.depth >= this.maxDepth) {
+      return;
+    }
+
+    this.hasSubdivided = true;
+
     const pointsToRoute = this.points;
     const boundsToRoute = this.boundedItems;
     this.points = [];
@@ -206,11 +360,9 @@ export default class QuadTree {
         this.routePoint(point);
       }
     }
-    
+
     for (const bounded of boundsToRoute) {
-      if (this.area.intersects(bounded.bounds)) {
-        this.routeBounds(bounded);
-      }
+      this.insertBounds(bounded);
     }
   }
 
@@ -222,41 +374,17 @@ export default class QuadTree {
         ? point.x <= cx ? "topLeft" : "topRight"
         : point.x <= cx ? "bottomLeft" : "bottomRight";
 
+    this.childAt(key).addPoint(point);
+  }
+
+  private childAt(key: keyof Quadrants): QuadTree {
     let child = this.quadrants[key];
     if (!child) {
       child = this.createChild(key);
       this.quadrants[key] = child;
       this.hasQuadrants = true;
     }
-    child.addPoint(point);
-  }
-  
-  private routeBounds(item: BoundedItem): void {
-    const cx = this.area.center.x;
-    const cy = this.area.center.y;
-    const halfW = this.area.width / 2;
-    const halfH = this.area.height / 2;
-    const quarterW = halfW / 2;
-    const quarterH = halfH / 2;
-
-    const areas: Record<keyof Quadrants, Rectangle> = {
-      topLeft: new Rectangle(halfW, halfH, new Point(cx - quarterW, cy - quarterH)),
-      topRight: new Rectangle(halfW, halfH, new Point(cx + quarterW, cy - quarterH)),
-      bottomLeft: new Rectangle(halfW, halfH, new Point(cx - quarterW, cy + quarterH)),
-      bottomRight: new Rectangle(halfW, halfH, new Point(cx + quarterW, cy + quarterH)),
-    };
-
-    for (const key of ["topLeft", "topRight", "bottomLeft", "bottomRight"] as const) {
-      if (areas[key].intersects(item.bounds)) {
-        let child = this.quadrants[key];
-        if (!child) {
-          child = this.createChild(key);
-          this.quadrants[key] = child;
-          this.hasQuadrants = true;
-        }
-        child.addBounds(item.id, item.bounds);
-      }
-    }
+    return child;
   }
 
   private createChild(key: keyof Quadrants): QuadTree {
@@ -288,13 +416,9 @@ export default class QuadTree {
         break;
     }
 
-    return new QuadTree(
-      new Rectangle(halfW, halfH, new Point(childCx, childCy)),
-      this.maxDepth,
-      this.maxPoints,
-      this.depth + 1,
-      this.pointRegistry,
-      this.boundsRegistry
-    );
+    const child = new QuadTree(new Rectangle(halfW, halfH, new Point(childCx, childCy)), this.maxDepth, this.maxPoints, this.depth + 1);
+    child.pointRegistry = this.pointRegistry;
+    child.boundsRegistry = this.boundsRegistry;
+    return child;
   }
 }

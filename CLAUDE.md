@@ -16,7 +16,7 @@ Spatial partitioning quadtree for efficient 2D point queries. Auto-subdivides wh
 
 ## Public API
 
-`QuadTree` is the sole re-export from `src/index.ts`. The `Quadrants` type is exported from `QuadTree.ts` but not re-exported from the index.
+`src/index.ts` re-exports the `QuadTree` class plus the `Quadrants` and `BoundedItem` types.
 
 ### Constructor
 
@@ -26,24 +26,36 @@ Spatial partitioning quadtree for efficient 2D point queries. Auto-subdivides wh
 
 | Method | Description |
 |--------|-------------|
-| `addPoint(point): boolean` | Insert; returns false if point lies outside `area`. Triggers subdivision when `points.length > maxPoints` and `depth < maxDepth` |
-| `query(area): Point[]` | Find points intersecting `area` (recurses into child quadrants) |
-| `clear()` | Reset points and child quadrants |
-| `clearPoints()` | Reset points only |
+| `addPoint(point): boolean` | Insert; returns false if point lies outside `area`. Triggers subdivision when stored count exceeds `maxPoints` and `depth < maxDepth` |
+| `addBounds(id, bounds): boolean` | Insert an AABB; returns false if it does not intersect `area` |
+| `remove(id): boolean` | Remove the point or bounds registered under `id` |
+| `updatePoint(id, newPoint): boolean` | Re-index a moved point; returns false (leaving it in place) if the new position is outside `area` |
+| `updateBounds(id, newBounds): boolean` | Re-index moved bounds; same rejection rule |
+| `query(area): Point[]` | Find points intersecting `area`. Bounded items are **not** included |
+| `queryBounds(area): BoundedItem[]` | Find bounded items intersecting `area`. Points are not included |
+| `queryIds(area): string[]` | Ids of both points and bounded items intersecting `area` |
+| `clear()` | Reset points, bounded items and child quadrants |
+| `clearPoints()` | Reset points and bounded items recursively through the whole tree, keeping the quadrant structure |
 
 ### Readonly Properties
 
-`area`, `maxDepth`, `maxPoints`, `depth`, plus mutable `points: Point[]`, `quadrants: Quadrants`, `hasQuadrants: boolean`.
+`area`, `maxDepth`, `maxPoints`, `depth`, plus mutable `points: Point[]`, `boundedItems: BoundedItem[]`, `quadrants: Quadrants`, `hasQuadrants: boolean`.
 
 ## Behavioral Invariants
 
 - After subdivision, the parent node's `points` array is cleared — points live only in leaf quadrants. `query` branches on `hasQuadrants`, not on `points.length`.
-- Subdivision is one-shot: on the transition, `subdivide()` routes existing points to children, then subsequent `addPoint` calls route directly via `routePoint` without touching `this.points`.
-- Children are allocated **lazily** — only the quadrants that actually receive a point are created. `hasQuadrants` flips true the moment the first child is allocated.
-- Quadrant assignment is by center comparison (not intersection iteration): boundary points where `x === center.x` or `y === center.y` go to the top/left side.
+- Bounded items are stored **exactly once**, on the deepest node whose `area` fully contains them; an item straddling a node's center stays on that node rather than being copied into each overlapping child. So internal nodes may hold `boundedItems`, and `queryInto` scans `boundedItems` at every node it visits while scanning `points` only at leaves. Because storage is exactly-once, `queryIds` needs no deduplication.
+- Subdivision is one-shot, tracked by the private `hasSubdivided`. The public `hasQuadrants` means "at least one child object exists" and can still be false after subdividing — a node whose items all straddle its center allocates no children. Route on `hasSubdivided`, recurse on `hasQuadrants`.
+- Children are allocated **lazily** — only the quadrants that actually receive a point or a contained item are created.
+- Quadrant assignment for points is by center comparison: boundary points where `x === center.x` or `y === center.y` go to the top/left side. `childContaining` follows the same tie-break for bounds.
 - `createChild` builds one quadrant on demand; no throwaway allocations on inserts.
-- Out-of-bounds entries in `points` (e.g. from direct mutation of the public field) are silently dropped during `subdivide` — they fail the area check and are not routed.
+- Out-of-bounds entries in `points` (e.g. from direct mutation of the public field) are silently dropped during subdivision — they fail the area check and are not routed.
 - Leaves at `depth === maxDepth` keep all points unconditionally (never subdivide).
+- Removal is the inverse of subdivision: as the recursion unwinds, `pruneChild` drops an emptied quadrant and merges leaf children back into their parent once their combined count fits `maxPoints`, so a branch collapses bottom-up in one pass. A tree that has been churned ends up with the same node count as one built from scratch at the same positions. The cost is that a node sitting exactly at `maxPoints` splits and merges on every add/remove cycle (~1 µs vs ~0.4 µs if the merge threshold were lowered) — measured and accepted in favour of query speed.
+- `queryInto` takes `null` for either accumulator to skip collecting that kind, which is how `query` avoids touching bounded items and `queryBounds` avoids touching points.
+- Ids are unique across the tree: inserting an id that is already registered removes the previous entry first (a point can be replaced by bounds and vice versa). An insert or update rejected for falling outside `area` has no side effects — the previous entry stays put and the call returns `false`.
+- The id registries hold position *snapshots*, not references, so removal still works after a caller mutates a `Point` or `Rectangle` in place. Registries live on the root and are shared by reference with every child.
+- Re-registering an id mutates its existing snapshot rather than deleting and re-inserting the Map entry. `Map.delete` + `Map.set` of the same key costs ~10 µs on a registry of a few thousand ids and used to dominate the update path — do not "simplify" `registerPoint` / `registerBounds` back into `remove()` + `set()`.
 
 ## Dependencies
 
